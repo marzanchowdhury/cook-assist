@@ -47,7 +47,7 @@ export default function CookingPage() {
   const [timerRunning, setTimerRunning] = useState(false);
   const [timerComplete, setTimerComplete] = useState(false);
 
-  // Voice recognition state
+  // Voice state
   const [voiceSupported, setVoiceSupported] = useState(true);
   const [voiceStatus, setVoiceStatus] =
     useState<VoiceStatus>("idle");
@@ -56,18 +56,41 @@ export default function CookingPage() {
     "Tap the microphone and speak a command."
   );
 
-  // Stores the active browser speech-recognition session.
+  // Hands-free mode
+  const [handsFreeMode, setHandsFreeMode] = useState(false);
+
+  // Active speech-recognition session
   const recognitionRef =
     useRef<SpeechRecognition | null>(null);
 
-  /*
-   * When Repeat Step is recognized, we wait until speech
-   * recognition fully ends before starting text-to-speech.
-   */
-  const repeatAfterRecognitionRef = useRef(false);
+  // Current Hands-Free Mode state
+  const handsFreeModeRef = useRef(false);
+
+  // True while Cook Assist is speaking
+  const speakingRef = useRef(false);
+
+  // True while speech is scheduled but has not started
+  const speechPendingRef = useRef(false);
+
+  // Latest command processor
+  const processVoiceCommandRef = useRef<
+    ((transcript: string, requireWakePhrase?: boolean) => void) | null
+  >(null);
+
+  // Latest recognition starter
+  const startVoiceRecognitionRef = useRef<
+    ((handsFreeSession?: boolean) => void) | null
+  >(null);
 
   /*
-   * Load the selected recipe and cooking steps from Supabase.
+   * Keep hands-free ref synchronized.
+   */
+  useEffect(() => {
+    handsFreeModeRef.current = handsFreeMode;
+  }, [handsFreeMode]);
+
+  /*
+   * Load recipe and cooking steps.
    */
   useEffect(() => {
     async function loadCookingData() {
@@ -132,74 +155,25 @@ export default function CookingPage() {
   const currentStep = steps[currentStepIndex];
 
   /*
-   * Reset the timer whenever the cooking step changes.
+   * Reset timer whenever the cooking step changes.
    */
   useEffect(() => {
     const timerSeconds =
       currentStep?.timer_seconds ?? null;
 
-    const resetTimerForStep = window.setTimeout(() => {
+    const timeout = window.setTimeout(() => {
       setTimerRunning(false);
       setTimerComplete(false);
       setTimeLeft(timerSeconds);
     }, 0);
 
     return () => {
-      window.clearTimeout(resetTimerForStep);
+      window.clearTimeout(timeout);
     };
   }, [currentStep]);
 
   /*
-   * Timer countdown.
-   */
-  useEffect(() => {
-    if (
-      !timerRunning ||
-      timeLeft === null ||
-      timeLeft <= 0
-    ) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      setTimeLeft((previousTime) => {
-        if (previousTime === null) {
-          return null;
-        }
-
-        if (previousTime <= 1) {
-          setTimerRunning(false);
-          setTimerComplete(true);
-
-          if ("speechSynthesis" in window) {
-            window.speechSynthesis.cancel();
-
-            const message =
-              new SpeechSynthesisUtterance(
-                "Timer complete. You can continue to the next step."
-              );
-
-            message.rate = 0.9;
-            message.pitch = 1;
-            message.volume = 1;
-
-            window.speechSynthesis.speak(message);
-          }
-
-          return 0;
-        }
-
-        return previousTime - 1;
-      });
-    }, 1000);
-
-    return () => {
-      window.clearTimeout(timeout);
-    };
-  }, [timerRunning, timeLeft]);
-
-  /*
-   * Move to the next cooking step.
+   * Next step.
    */
   const nextStep = useCallback(() => {
     setCurrentStepIndex((previousIndex) => {
@@ -212,7 +186,7 @@ export default function CookingPage() {
   }, [steps.length]);
 
   /*
-   * Move to the previous cooking step.
+   * Previous step.
    */
   const previousStep = useCallback(() => {
     setCurrentStepIndex((previousIndex) => {
@@ -225,33 +199,7 @@ export default function CookingPage() {
   }, []);
 
   /*
-   * Read the current instruction aloud.
-   */
-  const speakCurrentStep = useCallback(() => {
-    const step = steps[currentStepIndex];
-
-    if (
-      !step ||
-      !("speechSynthesis" in window)
-    ) {
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-
-    const message = new SpeechSynthesisUtterance(
-      step.instruction
-    );
-
-    message.rate = 0.9;
-    message.pitch = 1;
-    message.volume = 1;
-
-    window.speechSynthesis.speak(message);
-  }, [steps, currentStepIndex]);
-
-  /*
-   * Start or resume the current cooking timer.
+   * Start or resume timer.
    */
   const startTimer = useCallback(() => {
     const step = steps[currentStepIndex];
@@ -280,14 +228,14 @@ export default function CookingPage() {
   }, [steps, currentStepIndex]);
 
   /*
-   * Pause the active timer.
+   * Pause timer.
    */
   const pauseTimer = useCallback(() => {
     setTimerRunning(false);
   }, []);
 
   /*
-   * Reset the current timer.
+   * Reset timer.
    */
   const resetTimer = useCallback(() => {
     const step = steps[currentStepIndex];
@@ -306,7 +254,7 @@ export default function CookingPage() {
   }, [steps, currentStepIndex]);
 
   /*
-   * Convert seconds into MM:SS format.
+   * Format timer as MM:SS.
    */
   const formatTime = (totalSeconds: number) => {
     const minutes = Math.floor(totalSeconds / 60);
@@ -320,16 +268,205 @@ export default function CookingPage() {
   };
 
   /*
-   * Process a recognized voice command.
+   * Restart Hands-Free Mode after speech has finished.
+   *
+   * startVoiceRecognition is accessed through a ref,
+   * avoiding circular callback dependencies.
+   */
+  const restartHandsFreeAfterSpeech =
+    useCallback(() => {
+      if (!handsFreeModeRef.current) {
+        return;
+      }
+
+      window.setTimeout(() => {
+        if (
+          handsFreeModeRef.current &&
+          !recognitionRef.current &&
+          !speakingRef.current &&
+          !speechPendingRef.current
+        ) {
+          startVoiceRecognitionRef.current?.(true);
+        }
+      }, 400);
+    }, []);
+
+  /*
+   * Speak text aloud.
+   *
+   * Once speech finishes, Hands-Free Mode automatically
+   * begins listening again.
+   */
+  const speakText = useCallback(
+    (text: string) => {
+      if (!("speechSynthesis" in window)) {
+        speechPendingRef.current = false;
+
+        if (handsFreeModeRef.current) {
+          restartHandsFreeAfterSpeech();
+        }
+
+        return;
+      }
+
+      speechPendingRef.current = false;
+      speakingRef.current = true;
+
+      /*
+       * Stop recognition before speaking so Cook Assist
+       * does not hear its own voice.
+       */
+      if (recognitionRef.current) {
+        const activeRecognition =
+          recognitionRef.current;
+
+        recognitionRef.current = null;
+
+        try {
+          activeRecognition.abort();
+        } catch {
+          // Recognition may already have ended.
+        }
+      }
+
+      window.speechSynthesis.cancel();
+
+      const message =
+        new SpeechSynthesisUtterance(text);
+
+      message.rate = 0.9;
+      message.pitch = 1;
+      message.volume = 1;
+
+      message.onend = () => {
+        speakingRef.current = false;
+
+        if (handsFreeModeRef.current) {
+          setVoiceStatus("listening");
+          setVoiceMessage(
+            'Hands-Free Mode is listening. Say "Cook Assist" followed by a command.'
+          );
+
+          restartHandsFreeAfterSpeech();
+        }
+      };
+
+      message.onerror = () => {
+        speakingRef.current = false;
+
+        if (handsFreeModeRef.current) {
+          setVoiceStatus("listening");
+          setVoiceMessage(
+            'Hands-Free Mode is listening. Say "Cook Assist" followed by a command.'
+          );
+
+          restartHandsFreeAfterSpeech();
+        }
+      };
+
+      window.speechSynthesis.speak(message);
+    },
+    [restartHandsFreeAfterSpeech]
+  );
+
+  /*
+   * Read the current step aloud.
+   */
+  const speakCurrentStep = useCallback(() => {
+    const step = steps[currentStepIndex];
+
+    if (!step) {
+      speechPendingRef.current = false;
+      return;
+    }
+
+    speakText(step.instruction);
+  }, [steps, currentStepIndex, speakText]);
+
+  /*
+   * Timer countdown.
+   */
+  useEffect(() => {
+    if (
+      !timerRunning ||
+      timeLeft === null ||
+      timeLeft <= 0
+    ) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setTimeLeft((previousTime) => {
+        if (previousTime === null) {
+          return null;
+        }
+
+        if (previousTime <= 1) {
+          setTimerRunning(false);
+          setTimerComplete(true);
+
+          speechPendingRef.current = true;
+
+          window.setTimeout(() => {
+            speakText(
+              "Timer complete. You can continue to the next step."
+            );
+          }, 100);
+
+          return 0;
+        }
+
+        return previousTime - 1;
+      });
+    }, 1000);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [timerRunning, timeLeft, speakText]);
+
+  /*
+   * Process recognized commands.
    */
   const processVoiceCommand = useCallback(
-    (transcript: string) => {
-      const command = transcript
+    (
+      transcript: string,
+      requireWakePhrase = false
+    ) => {
+      let command = transcript
         .toLowerCase()
         .trim()
         .replace(/[.,!?]/g, "");
 
       setHeardCommand(transcript);
+
+      /*
+       * Hands-Free Mode requires the wake phrase.
+       */
+      if (requireWakePhrase) {
+        const wakePhrase =
+          /\bcook\s+assist\b/;
+
+        if (!wakePhrase.test(command)) {
+          setVoiceStatus("listening");
+          setVoiceMessage(
+            'Hands-Free Mode is listening. Say "Cook Assist" followed by a command.'
+          );
+          return;
+        }
+
+        command = command
+          .replace(wakePhrase, "")
+          .trim();
+
+        if (!command) {
+          setVoiceStatus("listening");
+          setVoiceMessage(
+            'Say a command after "Cook Assist", such as "Cook Assist, next step."'
+          );
+          return;
+        }
+      }
 
       /*
        * NEXT STEP
@@ -349,12 +486,28 @@ export default function CookingPage() {
           return;
         }
 
+        const nextInstruction =
+          steps[currentStepIndex + 1]?.instruction;
+
+        if (nextInstruction) {
+          speechPendingRef.current = true;
+        }
+
         nextStep();
 
         setVoiceStatus("success");
         setVoiceMessage(
           "Moving to the next step."
         );
+
+        /*
+         * Automatically read the new step.
+         */
+        if (nextInstruction) {
+          window.setTimeout(() => {
+            speakText(nextInstruction);
+          }, 250);
+        }
 
         return;
       }
@@ -376,6 +529,13 @@ export default function CookingPage() {
           return;
         }
 
+        const previousInstruction =
+          steps[currentStepIndex - 1]?.instruction;
+
+        if (previousInstruction) {
+          speechPendingRef.current = true;
+        }
+
         previousStep();
 
         setVoiceStatus("success");
@@ -383,27 +543,39 @@ export default function CookingPage() {
           "Moving to the previous step."
         );
 
+        /*
+         * Automatically read the previous step.
+         */
+        if (previousInstruction) {
+          window.setTimeout(() => {
+            speakText(previousInstruction);
+          }, 250);
+        }
+
         return;
       }
 
       /*
        * REPEAT STEP
-       *
-       * Do not speak immediately. The recognition session
-       * may still own the browser audio input/output path.
-       * Instead, queue the instruction for recognition.onend.
        */
       if (
         command.includes("repeat step") ||
         command.includes("repeat instruction") ||
         command === "repeat"
       ) {
-        repeatAfterRecognitionRef.current = true;
+        speechPendingRef.current = true;
 
         setVoiceStatus("success");
         setVoiceMessage(
           "Repeating the current instruction."
         );
+
+        /*
+         * Give recognition time to release the microphone.
+         */
+        window.setTimeout(() => {
+          speakCurrentStep();
+        }, 250);
 
         return;
       }
@@ -479,12 +651,19 @@ export default function CookingPage() {
       }
 
       /*
-       * COMMAND NOT RECOGNIZED
+       * UNKNOWN COMMAND
        */
       setVoiceStatus("error");
-      setVoiceMessage(
-        'Command not recognized. Try "Next Step", "Previous Step", "Repeat Step", or a timer command.'
-      );
+
+      if (requireWakePhrase) {
+        setVoiceMessage(
+          'Command not recognized. Try "Cook Assist, next step".'
+        );
+      } else {
+        setVoiceMessage(
+          'Command not recognized. Try "Next Step", "Previous Step", "Repeat Step", or a timer command.'
+        );
+      }
     },
     [
       currentStepIndex,
@@ -495,11 +674,280 @@ export default function CookingPage() {
       startTimer,
       pauseTimer,
       resetTimer,
+      speakText,
+      speakCurrentStep,
     ]
   );
 
   /*
-   * Detect whether the browser supports speech recognition.
+   * Keep the command-processing ref up to date.
+   */
+  useEffect(() => {
+    processVoiceCommandRef.current =
+      processVoiceCommand;
+  }, [processVoiceCommand]);
+
+  /*
+   * Start speech recognition.
+   */
+  const startVoiceRecognition = useCallback(
+    (handsFreeSession = false) => {
+      const SpeechRecognitionAPI =
+        window.SpeechRecognition ??
+        window.webkitSpeechRecognition;
+
+      if (!SpeechRecognitionAPI) {
+        setVoiceSupported(false);
+        setVoiceStatus("unsupported");
+        setVoiceMessage(
+          "Voice commands are not supported in this browser."
+        );
+        return;
+      }
+
+      /*
+       * Never listen while Cook Assist is speaking or
+       * waiting to speak.
+       */
+      if (
+        speakingRef.current ||
+        speechPendingRef.current
+      ) {
+        return;
+      }
+
+      /*
+       * Prevent multiple recognition sessions.
+       */
+      if (recognitionRef.current) {
+        return;
+      }
+
+      const recognition =
+        new SpeechRecognitionAPI();
+
+      recognition.lang = "en-CA";
+      recognition.continuous = false;
+      recognition.interimResults = false;
+
+      recognitionRef.current = recognition;
+
+      recognition.onstart = () => {
+        if (!handsFreeSession) {
+          setHeardCommand("");
+        }
+
+        setVoiceStatus("listening");
+
+        if (handsFreeSession) {
+          setVoiceMessage(
+            'Hands-Free Mode is listening. Say "Cook Assist" followed by a command.'
+          );
+        } else {
+          setVoiceMessage("Listening...");
+        }
+      };
+
+      recognition.onresult = (
+        event: SpeechRecognitionEvent
+      ) => {
+        const transcript =
+          event.results[0]?.[0]?.transcript ?? "";
+
+        if (!transcript) {
+          if (!handsFreeSession) {
+            setVoiceStatus("error");
+            setVoiceMessage(
+              "I could not hear a command. Please try again."
+            );
+          }
+
+          return;
+        }
+
+        processVoiceCommandRef.current?.(
+          transcript,
+          handsFreeSession
+        );
+      };
+
+      recognition.onerror = (
+        event: SpeechRecognitionErrorEvent
+      ) => {
+        if (
+          event.error === "not-allowed" ||
+          event.error === "service-not-allowed"
+        ) {
+          handsFreeModeRef.current = false;
+
+          setHandsFreeMode(false);
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "Microphone permission was denied. Allow microphone access in your browser to use voice commands."
+          );
+
+          return;
+        }
+
+        if (event.error === "audio-capture") {
+          handsFreeModeRef.current = false;
+
+          setHandsFreeMode(false);
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "No microphone was detected."
+          );
+
+          return;
+        }
+
+        if (event.error === "aborted") {
+          return;
+        }
+
+        /*
+         * No speech is normal in Hands-Free Mode.
+         */
+        if (
+          event.error === "no-speech" &&
+          handsFreeSession &&
+          handsFreeModeRef.current
+        ) {
+          return;
+        }
+
+        if (event.error === "no-speech") {
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "No speech was detected. Tap the microphone and try again."
+          );
+
+          return;
+        }
+
+        if (
+          handsFreeSession &&
+          handsFreeModeRef.current
+        ) {
+          return;
+        }
+
+        setVoiceStatus("error");
+        setVoiceMessage(
+          "Voice recognition was unsuccessful. Please try again."
+        );
+      };
+
+      recognition.onend = () => {
+        if (
+          recognitionRef.current === recognition
+        ) {
+          recognitionRef.current = null;
+        }
+
+        /*
+         * Do not restart recognition while speech is
+         * pending or active.
+         *
+         * speakText() will restart it after speech ends.
+         */
+        if (
+          speechPendingRef.current ||
+          speakingRef.current
+        ) {
+          return;
+        }
+
+        /*
+         * Continue listening during Hands-Free Mode.
+         */
+        if (
+          handsFreeSession &&
+          handsFreeModeRef.current
+        ) {
+          window.setTimeout(() => {
+            if (
+              handsFreeModeRef.current &&
+              !recognitionRef.current &&
+              !speakingRef.current &&
+              !speechPendingRef.current
+            ) {
+              startVoiceRecognitionRef.current?.(
+                true
+              );
+            }
+          }, 300);
+
+          return;
+        }
+
+        /*
+         * Manual microphone session ended without
+         * a recognized command.
+         */
+        if (!handsFreeSession) {
+          setVoiceStatus((currentStatus) => {
+            if (currentStatus === "listening") {
+              setVoiceMessage(
+                "No command was detected. Tap the microphone to try again."
+              );
+
+              return "error";
+            }
+
+            return currentStatus;
+          });
+        }
+      };
+
+      try {
+        recognition.start();
+      } catch {
+        if (
+          recognitionRef.current === recognition
+        ) {
+          recognitionRef.current = null;
+        }
+
+        if (
+          handsFreeSession &&
+          handsFreeModeRef.current
+        ) {
+          window.setTimeout(() => {
+            if (
+              handsFreeModeRef.current &&
+              !recognitionRef.current &&
+              !speakingRef.current &&
+              !speechPendingRef.current
+            ) {
+              startVoiceRecognitionRef.current?.(
+                true
+              );
+            }
+          }, 500);
+
+          return;
+        }
+
+        setVoiceStatus("error");
+        setVoiceMessage(
+          "Voice recognition could not be started. Please try again."
+        );
+      }
+    },
+    []
+  );
+
+  /*
+   * Keep recognition starter ref synchronized.
+   */
+  useEffect(() => {
+    startVoiceRecognitionRef.current =
+      startVoiceRecognition;
+  }, [startVoiceRecognition]);
+
+  /*
+   * Check browser speech-recognition support.
    */
   useEffect(() => {
     const SpeechRecognitionAPI =
@@ -510,197 +958,125 @@ export default function CookingPage() {
       return;
     }
 
-    const updateUnsupportedState =
-      window.setTimeout(() => {
-        setVoiceSupported(false);
-        setVoiceStatus("unsupported");
-        setVoiceMessage(
-          "Voice commands are not supported in this browser. Manual controls are still available."
-        );
-      }, 0);
+    const timeout = window.setTimeout(() => {
+      setVoiceSupported(false);
+      setVoiceStatus("unsupported");
+      setVoiceMessage(
+        "Voice commands are not supported in this browser. Manual controls are still available."
+      );
+    }, 0);
 
     return () => {
-      window.clearTimeout(updateUnsupportedState);
+      window.clearTimeout(timeout);
     };
   }, []);
 
   /*
-   * Start listening for one spoken command.
+   * Toggle Hands-Free Mode.
    */
-  const startVoiceRecognition = () => {
-    const SpeechRecognitionAPI =
-      window.SpeechRecognition ??
-      window.webkitSpeechRecognition;
-
-    if (!SpeechRecognitionAPI) {
-      setVoiceSupported(false);
+  function toggleHandsFreeMode() {
+    if (!voiceSupported) {
       setVoiceStatus("unsupported");
       setVoiceMessage(
-        "Voice commands are not supported in this browser."
+        "Hands-Free Mode is not supported in this browser."
       );
       return;
     }
 
     /*
-     * Stop an existing recognition session before starting
-     * another one.
+     * TURN OFF
      */
-    if (recognitionRef.current) {
-      recognitionRef.current.abort();
-      recognitionRef.current = null;
-    }
+    if (handsFreeModeRef.current) {
+      handsFreeModeRef.current = false;
+      speechPendingRef.current = false;
 
-    /*
-     * Clear any queued Repeat Step command.
-     */
-    repeatAfterRecognitionRef.current = false;
-
-    /*
-     * Stop existing speech before opening the microphone so
-     * Cook Assist cannot accidentally recognize itself.
-     */
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
-
-    const recognition =
-      new SpeechRecognitionAPI();
-
-    recognition.lang = "en-CA";
-    recognition.continuous = false;
-    recognition.interimResults = false;
-
-    recognitionRef.current = recognition;
-
-    /*
-     * Recognition started.
-     */
-    recognition.onstart = () => {
+      setHandsFreeMode(false);
+      setVoiceStatus("idle");
       setHeardCommand("");
-      setVoiceStatus("listening");
-      setVoiceMessage("Listening...");
-    };
-
-    /*
-     * Speech recognized.
-     */
-    recognition.onresult = (
-      event: SpeechRecognitionEvent
-    ) => {
-      const transcript =
-        event.results[0]?.[0]?.transcript ?? "";
-
-      if (!transcript) {
-        setVoiceStatus("error");
-        setVoiceMessage(
-          "I could not hear a command. Please try again."
-        );
-        return;
-      }
-
-      processVoiceCommand(transcript);
-    };
-
-    /*
-     * Handle recognition errors.
-     */
-    recognition.onerror = (
-      event: SpeechRecognitionErrorEvent
-    ) => {
-      repeatAfterRecognitionRef.current = false;
-
-      if (
-        event.error === "not-allowed" ||
-        event.error === "service-not-allowed"
-      ) {
-        setVoiceStatus("error");
-        setVoiceMessage(
-          "Microphone permission was denied. Allow microphone access in your browser to use voice commands."
-        );
-        return;
-      }
-
-      if (event.error === "no-speech") {
-        setVoiceStatus("error");
-        setVoiceMessage(
-          "No speech was detected. Tap the microphone and try again."
-        );
-        return;
-      }
-
-      if (event.error === "audio-capture") {
-        setVoiceStatus("error");
-        setVoiceMessage(
-          "No microphone was detected."
-        );
-        return;
-      }
-
-      if (event.error === "aborted") {
-        return;
-      }
-
-      setVoiceStatus("error");
       setVoiceMessage(
-        "Voice recognition was unsuccessful. Please try again."
+        "Hands-Free Mode is off. Tap the microphone and speak a command."
       );
-    };
 
-    /*
-     * Recognition has completely ended.
-     *
-     * If Repeat Step was requested, this is now the safe
-     * point to start text-to-speech.
-     */
-    recognition.onend = () => {
-      recognitionRef.current = null;
+      if (recognitionRef.current) {
+        const activeRecognition =
+          recognitionRef.current;
 
-      if (repeatAfterRecognitionRef.current) {
-        repeatAfterRecognitionRef.current = false;
+        recognitionRef.current = null;
 
-        window.setTimeout(() => {
-          speakCurrentStep();
-        }, 150);
-
-        return;
-      }
-
-      setVoiceStatus((currentStatus) => {
-        if (currentStatus === "listening") {
-          setVoiceMessage(
-            "No command was detected. Tap the microphone to try again."
-          );
-
-          return "error";
+        try {
+          activeRecognition.abort();
+        } catch {
+          // Recognition may already have ended.
         }
+      }
 
-        return currentStatus;
-      });
-    };
+      return;
+    }
 
     /*
-     * Start microphone recognition.
+     * TURN ON
      */
-    try {
-      recognition.start();
-    } catch {
-      recognitionRef.current = null;
-      repeatAfterRecognitionRef.current = false;
+    handsFreeModeRef.current = true;
 
-      setVoiceStatus("error");
-      setVoiceMessage(
-        "Voice recognition could not be started. Please try again."
-      );
+    setHandsFreeMode(true);
+    setHeardCommand("");
+    setVoiceStatus("listening");
+    setVoiceMessage(
+      'Hands-Free Mode is listening. Say "Cook Assist" followed by a command.'
+    );
+
+    if (recognitionRef.current) {
+      const activeRecognition =
+        recognitionRef.current;
+
+      recognitionRef.current = null;
+
+      try {
+        activeRecognition.abort();
+      } catch {
+        // Recognition may already have ended.
+      }
+
+      window.setTimeout(() => {
+        if (
+          handsFreeModeRef.current &&
+          !recognitionRef.current &&
+          !speakingRef.current &&
+          !speechPendingRef.current
+        ) {
+          startVoiceRecognitionRef.current?.(
+            true
+          );
+        }
+      }, 300);
+
+      return;
     }
-  };
+
+    startVoiceRecognition(true);
+  }
 
   /*
-   * Stop voice services when leaving the cooking page.
+   * Stop speech services when leaving the page.
    */
   useEffect(() => {
     return () => {
-      recognitionRef.current?.abort();
-      repeatAfterRecognitionRef.current = false;
+      handsFreeModeRef.current = false;
+      speechPendingRef.current = false;
+      speakingRef.current = false;
+
+      if (recognitionRef.current) {
+        const activeRecognition =
+          recognitionRef.current;
+
+        recognitionRef.current = null;
+
+        try {
+          activeRecognition.abort();
+        } catch {
+          // Recognition may already have ended.
+        }
+      }
 
       if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
@@ -757,9 +1133,6 @@ export default function CookingPage() {
     );
   }
 
-  /*
-   * Calculate recipe progress dynamically.
-   */
   const progress =
     ((currentStepIndex + 1) / steps.length) * 100;
 
@@ -820,10 +1193,8 @@ export default function CookingPage() {
           </p>
         </section>
 
-        {/* Current Cooking Step */}
+        {/* Current Step */}
         <section className="flex flex-1 flex-col px-6 pt-8">
-
-          {/* Step Image */}
           <div className="flex min-h-[220px] items-center justify-center overflow-hidden rounded-3xl bg-gray-100">
             {currentStep.image_url ? (
               <div className="relative h-[220px] w-full">
@@ -851,7 +1222,6 @@ export default function CookingPage() {
             )}
           </div>
 
-          {/* Instruction */}
           <div className="flex flex-1 items-center justify-center py-8">
             <h1 className="text-center text-3xl font-semibold leading-relaxed text-gray-900">
               {currentStep.instruction}
@@ -859,11 +1229,10 @@ export default function CookingPage() {
           </div>
         </section>
 
-        {/* Cooking Timer */}
+        {/* Timer */}
         {currentStep.timer_seconds !== null &&
           timeLeft !== null && (
             <section className="mx-6 mb-6 rounded-3xl border border-gray-200 bg-gray-50 p-5">
-
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-gray-500">
@@ -886,7 +1255,6 @@ export default function CookingPage() {
                 </span>
               </div>
 
-              {/* Timer Completion Feedback */}
               {timerComplete && (
                 <div
                   role="status"
@@ -903,7 +1271,6 @@ export default function CookingPage() {
                 </div>
               )}
 
-              {/* Timer Controls */}
               <div className="mt-4 flex gap-2">
                 {!timerRunning ? (
                   <button
@@ -940,13 +1307,55 @@ export default function CookingPage() {
 
         {/* Voice Commands */}
         <section className="mx-6 mb-6 rounded-3xl border border-gray-200 bg-gray-50 p-5">
+
+          {/* Hands-Free Mode */}
+          <div className="mb-5 flex items-center justify-between rounded-2xl bg-white p-4">
+            <div className="pr-4">
+              <p className="font-semibold text-gray-900">
+                Hands-Free Mode
+              </p>
+
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                {handsFreeMode
+                  ? 'Listening for "Cook Assist" commands.'
+                  : "Enable continuous voice listening while cooking."}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={toggleHandsFreeMode}
+              disabled={!voiceSupported}
+              role="switch"
+              aria-checked={handsFreeMode}
+              aria-label="Toggle Hands-Free Mode"
+              className={`relative h-8 w-14 shrink-0 rounded-full transition ${
+                handsFreeMode
+                  ? "bg-gray-900"
+                  : "bg-gray-300"
+              } disabled:cursor-not-allowed disabled:opacity-50`}
+            >
+              <span
+                className={`absolute top-1 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                  handsFreeMode
+                    ? "left-7"
+                    : "left-1"
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Microphone */}
           <div className="flex items-center gap-4">
             <button
               type="button"
-              onClick={startVoiceRecognition}
+              onClick={() =>
+                startVoiceRecognition(false)
+              }
               disabled={
                 !voiceSupported ||
-                voiceStatus === "listening"
+                voiceStatus === "listening" ||
+                handsFreeMode
               }
               className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-gray-900 text-2xl text-white shadow-md transition hover:bg-gray-700 disabled:cursor-not-allowed disabled:bg-gray-400"
               aria-label="Start voice command"
@@ -970,7 +1379,7 @@ export default function CookingPage() {
             </div>
           </div>
 
-          {/* Recognized Speech */}
+          {/* Heard */}
           {heardCommand && (
             <div className="mt-4 rounded-xl bg-white p-3">
               <p className="text-xs font-medium uppercase tracking-wide text-gray-400">
@@ -983,16 +1392,29 @@ export default function CookingPage() {
             </div>
           )}
 
-          {/* Available Commands */}
+          {/* Command Help */}
           <div className="mt-4 border-t border-gray-200 pt-4">
-            <p className="text-xs leading-5 text-gray-500">
-              Try saying: &quot;Next Step&quot; ·
-              &quot; Previous Step&quot; ·
-              &quot; Repeat Step&quot; ·
-              &quot; Start Timer&quot; ·
-              &quot; Pause Timer&quot; ·
-              &quot; Reset Timer&quot;
-            </p>
+            {handsFreeMode ? (
+              <p className="text-xs leading-5 text-gray-500">
+                Say &quot;Cook Assist, Next Step&quot; ·
+                &quot; Cook Assist, Previous Step&quot; ·
+                &quot; Cook Assist, Repeat Step&quot; ·
+                &quot; Cook Assist, Start Timer&quot; ·
+                &quot; Cook Assist, Pause Timer&quot; ·
+                &quot; Cook Assist, Resume Timer&quot; ·
+                &quot; Cook Assist, Reset Timer&quot;
+              </p>
+            ) : (
+              <p className="text-xs leading-5 text-gray-500">
+                Try saying: &quot;Next Step&quot; ·
+                &quot; Previous Step&quot; ·
+                &quot; Repeat Step&quot; ·
+                &quot; Start Timer&quot; ·
+                &quot; Pause Timer&quot; ·
+                &quot; Resume Timer&quot; ·
+                &quot; Reset Timer&quot;
+              </p>
+            )}
           </div>
         </section>
 
@@ -1003,8 +1425,6 @@ export default function CookingPage() {
           </p>
 
           <div className="flex items-center justify-between">
-
-            {/* Previous */}
             <button
               type="button"
               onClick={previousStep}
@@ -1015,7 +1435,6 @@ export default function CookingPage() {
               ←
             </button>
 
-            {/* Repeat */}
             <button
               type="button"
               onClick={speakCurrentStep}
@@ -1034,7 +1453,6 @@ export default function CookingPage() {
               </span>
             </button>
 
-            {/* Next / Finish */}
             {isFinalStep ? (
               <Link
                 href={`/complete?recipe=${recipe.id}`}
