@@ -3,7 +3,12 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { supabase } from "@/lib/supabase";
 
 type Recipe = {
@@ -19,6 +24,13 @@ type RecipeStep = {
   timer_seconds: number | null;
 };
 
+type VoiceStatus =
+  | "idle"
+  | "listening"
+  | "success"
+  | "error"
+  | "unsupported";
+
 export default function CookingPage() {
   const params = useParams();
   const recipeId = Number(params.id);
@@ -30,12 +42,32 @@ export default function CookingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Timer state
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [timerRunning, setTimerRunning] = useState(false);
   const [timerComplete, setTimerComplete] = useState(false);
 
+  // Voice recognition state
+  const [voiceSupported, setVoiceSupported] = useState(true);
+  const [voiceStatus, setVoiceStatus] =
+    useState<VoiceStatus>("idle");
+  const [heardCommand, setHeardCommand] = useState("");
+  const [voiceMessage, setVoiceMessage] = useState(
+    "Tap the microphone and speak a command."
+  );
+
+  // Stores the active browser speech-recognition session.
+  const recognitionRef =
+    useRef<SpeechRecognition | null>(null);
+
   /*
-   * Load the selected recipe and its cooking steps from Supabase.
+   * When Repeat Step is recognized, we wait until speech
+   * recognition fully ends before starting text-to-speech.
+   */
+  const repeatAfterRecognitionRef = useRef(false);
+
+  /*
+   * Load the selected recipe and cooking steps from Supabase.
    */
   useEffect(() => {
     async function loadCookingData() {
@@ -71,7 +103,9 @@ export default function CookingPage() {
             "id, step_number, instruction, image_url, timer_seconds"
           )
           .eq("recipe_id", recipeId)
-          .order("step_number", { ascending: true });
+          .order("step_number", {
+            ascending: true,
+          });
 
       if (stepError) {
         setError(stepError.message);
@@ -98,29 +132,25 @@ export default function CookingPage() {
   const currentStep = steps[currentStepIndex];
 
   /*
-   * Prepare the timer whenever the user changes cooking steps.
-   *
-   * The timer value comes directly from the current database step.
+   * Reset the timer whenever the cooking step changes.
    */
   useEffect(() => {
-    const timerSeconds = currentStep?.timer_seconds ?? null;
+    const timerSeconds =
+      currentStep?.timer_seconds ?? null;
 
-    const resetForCurrentStep = window.setTimeout(() => {
+    const resetTimerForStep = window.setTimeout(() => {
       setTimerRunning(false);
       setTimerComplete(false);
       setTimeLeft(timerSeconds);
     }, 0);
 
     return () => {
-      window.clearTimeout(resetForCurrentStep);
+      window.clearTimeout(resetTimerForStep);
     };
   }, [currentStep]);
 
   /*
-   * Run the cooking timer.
-   *
-   * Completion is handled inside the timeout callback rather than
-   * synchronously inside the effect.
+   * Timer countdown.
    */
   useEffect(() => {
     if (
@@ -171,32 +201,37 @@ export default function CookingPage() {
   /*
    * Move to the next cooking step.
    */
-  const nextStep = () => {
-    if (currentStepIndex < steps.length - 1) {
-      setCurrentStepIndex(
-        (previousIndex) => previousIndex + 1
-      );
-    }
-  };
+  const nextStep = useCallback(() => {
+    setCurrentStepIndex((previousIndex) => {
+      if (previousIndex < steps.length - 1) {
+        return previousIndex + 1;
+      }
+
+      return previousIndex;
+    });
+  }, [steps.length]);
 
   /*
    * Move to the previous cooking step.
    */
-  const previousStep = () => {
-    if (currentStepIndex > 0) {
-      setCurrentStepIndex(
-        (previousIndex) => previousIndex - 1
-      );
-    }
-  };
+  const previousStep = useCallback(() => {
+    setCurrentStepIndex((previousIndex) => {
+      if (previousIndex > 0) {
+        return previousIndex - 1;
+      }
+
+      return previousIndex;
+    });
+  }, []);
 
   /*
-   * Read the current instruction aloud using the browser's
-   * built-in speech synthesis functionality.
+   * Read the current instruction aloud.
    */
-  const speakCurrentStep = () => {
+  const speakCurrentStep = useCallback(() => {
+    const step = steps[currentStepIndex];
+
     if (
-      !currentStep ||
+      !step ||
       !("speechSynthesis" in window)
     ) {
       return;
@@ -205,7 +240,7 @@ export default function CookingPage() {
     window.speechSynthesis.cancel();
 
     const message = new SpeechSynthesisUtterance(
-      currentStep.instruction
+      step.instruction
     );
 
     message.rate = 0.9;
@@ -213,46 +248,62 @@ export default function CookingPage() {
     message.volume = 1;
 
     window.speechSynthesis.speak(message);
-  };
+  }, [steps, currentStepIndex]);
 
   /*
-   * Start or resume the timer for the current cooking step.
+   * Start or resume the current cooking timer.
    */
-  const startTimer = () => {
-    if (
-      !currentStep?.timer_seconds ||
-      timeLeft === null
-    ) {
+  const startTimer = useCallback(() => {
+    const step = steps[currentStepIndex];
+
+    if (!step?.timer_seconds) {
+      setVoiceStatus("error");
+      setVoiceMessage(
+        "There is no timer for the current step."
+      );
       return;
     }
 
-    if (timeLeft === 0) {
-      setTimeLeft(currentStep.timer_seconds);
-    }
+    setTimeLeft((previousTime) => {
+      if (
+        previousTime === null ||
+        previousTime === 0
+      ) {
+        return step.timer_seconds;
+      }
+
+      return previousTime;
+    });
 
     setTimerComplete(false);
     setTimerRunning(true);
-  };
+  }, [steps, currentStepIndex]);
 
   /*
-   * Pause the active cooking timer.
+   * Pause the active timer.
    */
-  const pauseTimer = () => {
+  const pauseTimer = useCallback(() => {
     setTimerRunning(false);
-  };
+  }, []);
 
   /*
-   * Restore the current step's timer to its original database value.
+   * Reset the current timer.
    */
-  const resetTimer = () => {
-    if (!currentStep?.timer_seconds) {
+  const resetTimer = useCallback(() => {
+    const step = steps[currentStepIndex];
+
+    if (!step?.timer_seconds) {
+      setVoiceStatus("error");
+      setVoiceMessage(
+        "There is no timer for the current step."
+      );
       return;
     }
 
     setTimerRunning(false);
     setTimerComplete(false);
-    setTimeLeft(currentStep.timer_seconds);
-  };
+    setTimeLeft(step.timer_seconds);
+  }, [steps, currentStepIndex]);
 
   /*
    * Convert seconds into MM:SS format.
@@ -267,6 +318,395 @@ export default function CookingPage() {
       .toString()
       .padStart(2, "0")}`;
   };
+
+  /*
+   * Process a recognized voice command.
+   */
+  const processVoiceCommand = useCallback(
+    (transcript: string) => {
+      const command = transcript
+        .toLowerCase()
+        .trim()
+        .replace(/[.,!?]/g, "");
+
+      setHeardCommand(transcript);
+
+      /*
+       * NEXT STEP
+       */
+      if (
+        command.includes("next step") ||
+        command === "next"
+      ) {
+        if (
+          currentStepIndex >=
+          steps.length - 1
+        ) {
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "You are already on the final step."
+          );
+          return;
+        }
+
+        nextStep();
+
+        setVoiceStatus("success");
+        setVoiceMessage(
+          "Moving to the next step."
+        );
+
+        return;
+      }
+
+      /*
+       * PREVIOUS STEP
+       */
+      if (
+        command.includes("previous step") ||
+        command.includes("go back") ||
+        command === "previous" ||
+        command === "back"
+      ) {
+        if (currentStepIndex === 0) {
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "You are already on the first step."
+          );
+          return;
+        }
+
+        previousStep();
+
+        setVoiceStatus("success");
+        setVoiceMessage(
+          "Moving to the previous step."
+        );
+
+        return;
+      }
+
+      /*
+       * REPEAT STEP
+       *
+       * Do not speak immediately. The recognition session
+       * may still own the browser audio input/output path.
+       * Instead, queue the instruction for recognition.onend.
+       */
+      if (
+        command.includes("repeat step") ||
+        command.includes("repeat instruction") ||
+        command === "repeat"
+      ) {
+        repeatAfterRecognitionRef.current = true;
+
+        setVoiceStatus("success");
+        setVoiceMessage(
+          "Repeating the current instruction."
+        );
+
+        return;
+      }
+
+      /*
+       * START / RESUME TIMER
+       */
+      if (
+        command.includes("start timer") ||
+        command.includes("resume timer")
+      ) {
+        const step = steps[currentStepIndex];
+
+        if (!step?.timer_seconds) {
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "There is no timer for the current step."
+          );
+          return;
+        }
+
+        startTimer();
+
+        setVoiceStatus("success");
+        setVoiceMessage("Timer started.");
+
+        return;
+      }
+
+      /*
+       * PAUSE / STOP TIMER
+       */
+      if (
+        command.includes("pause timer") ||
+        command.includes("stop timer")
+      ) {
+        if (!timerRunning) {
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "There is no active timer to pause."
+          );
+          return;
+        }
+
+        pauseTimer();
+
+        setVoiceStatus("success");
+        setVoiceMessage("Timer paused.");
+
+        return;
+      }
+
+      /*
+       * RESET TIMER
+       */
+      if (command.includes("reset timer")) {
+        const step = steps[currentStepIndex];
+
+        if (!step?.timer_seconds) {
+          setVoiceStatus("error");
+          setVoiceMessage(
+            "There is no timer for the current step."
+          );
+          return;
+        }
+
+        resetTimer();
+
+        setVoiceStatus("success");
+        setVoiceMessage("Timer reset.");
+
+        return;
+      }
+
+      /*
+       * COMMAND NOT RECOGNIZED
+       */
+      setVoiceStatus("error");
+      setVoiceMessage(
+        'Command not recognized. Try "Next Step", "Previous Step", "Repeat Step", or a timer command.'
+      );
+    },
+    [
+      currentStepIndex,
+      steps,
+      timerRunning,
+      nextStep,
+      previousStep,
+      startTimer,
+      pauseTimer,
+      resetTimer,
+    ]
+  );
+
+  /*
+   * Detect whether the browser supports speech recognition.
+   */
+  useEffect(() => {
+    const SpeechRecognitionAPI =
+      window.SpeechRecognition ??
+      window.webkitSpeechRecognition;
+
+    if (SpeechRecognitionAPI) {
+      return;
+    }
+
+    const updateUnsupportedState =
+      window.setTimeout(() => {
+        setVoiceSupported(false);
+        setVoiceStatus("unsupported");
+        setVoiceMessage(
+          "Voice commands are not supported in this browser. Manual controls are still available."
+        );
+      }, 0);
+
+    return () => {
+      window.clearTimeout(updateUnsupportedState);
+    };
+  }, []);
+
+  /*
+   * Start listening for one spoken command.
+   */
+  const startVoiceRecognition = () => {
+    const SpeechRecognitionAPI =
+      window.SpeechRecognition ??
+      window.webkitSpeechRecognition;
+
+    if (!SpeechRecognitionAPI) {
+      setVoiceSupported(false);
+      setVoiceStatus("unsupported");
+      setVoiceMessage(
+        "Voice commands are not supported in this browser."
+      );
+      return;
+    }
+
+    /*
+     * Stop an existing recognition session before starting
+     * another one.
+     */
+    if (recognitionRef.current) {
+      recognitionRef.current.abort();
+      recognitionRef.current = null;
+    }
+
+    /*
+     * Clear any queued Repeat Step command.
+     */
+    repeatAfterRecognitionRef.current = false;
+
+    /*
+     * Stop existing speech before opening the microphone so
+     * Cook Assist cannot accidentally recognize itself.
+     */
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    const recognition =
+      new SpeechRecognitionAPI();
+
+    recognition.lang = "en-CA";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognitionRef.current = recognition;
+
+    /*
+     * Recognition started.
+     */
+    recognition.onstart = () => {
+      setHeardCommand("");
+      setVoiceStatus("listening");
+      setVoiceMessage("Listening...");
+    };
+
+    /*
+     * Speech recognized.
+     */
+    recognition.onresult = (
+      event: SpeechRecognitionEvent
+    ) => {
+      const transcript =
+        event.results[0]?.[0]?.transcript ?? "";
+
+      if (!transcript) {
+        setVoiceStatus("error");
+        setVoiceMessage(
+          "I could not hear a command. Please try again."
+        );
+        return;
+      }
+
+      processVoiceCommand(transcript);
+    };
+
+    /*
+     * Handle recognition errors.
+     */
+    recognition.onerror = (
+      event: SpeechRecognitionErrorEvent
+    ) => {
+      repeatAfterRecognitionRef.current = false;
+
+      if (
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed"
+      ) {
+        setVoiceStatus("error");
+        setVoiceMessage(
+          "Microphone permission was denied. Allow microphone access in your browser to use voice commands."
+        );
+        return;
+      }
+
+      if (event.error === "no-speech") {
+        setVoiceStatus("error");
+        setVoiceMessage(
+          "No speech was detected. Tap the microphone and try again."
+        );
+        return;
+      }
+
+      if (event.error === "audio-capture") {
+        setVoiceStatus("error");
+        setVoiceMessage(
+          "No microphone was detected."
+        );
+        return;
+      }
+
+      if (event.error === "aborted") {
+        return;
+      }
+
+      setVoiceStatus("error");
+      setVoiceMessage(
+        "Voice recognition was unsuccessful. Please try again."
+      );
+    };
+
+    /*
+     * Recognition has completely ended.
+     *
+     * If Repeat Step was requested, this is now the safe
+     * point to start text-to-speech.
+     */
+    recognition.onend = () => {
+      recognitionRef.current = null;
+
+      if (repeatAfterRecognitionRef.current) {
+        repeatAfterRecognitionRef.current = false;
+
+        window.setTimeout(() => {
+          speakCurrentStep();
+        }, 150);
+
+        return;
+      }
+
+      setVoiceStatus((currentStatus) => {
+        if (currentStatus === "listening") {
+          setVoiceMessage(
+            "No command was detected. Tap the microphone to try again."
+          );
+
+          return "error";
+        }
+
+        return currentStatus;
+      });
+    };
+
+    /*
+     * Start microphone recognition.
+     */
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      repeatAfterRecognitionRef.current = false;
+
+      setVoiceStatus("error");
+      setVoiceMessage(
+        "Voice recognition could not be started. Please try again."
+      );
+    }
+  };
+
+  /*
+   * Stop voice services when leaving the cooking page.
+   */
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.abort();
+      repeatAfterRecognitionRef.current = false;
+
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
 
   /*
    * Loading state.
@@ -318,8 +758,7 @@ export default function CookingPage() {
   }
 
   /*
-   * Calculate progress dynamically from the number of
-   * cooking steps returned by Supabase.
+   * Calculate recipe progress dynamically.
    */
   const progress =
     ((currentStepIndex + 1) / steps.length) * 100;
@@ -387,16 +826,15 @@ export default function CookingPage() {
           {/* Step Image */}
           <div className="flex min-h-[220px] items-center justify-center overflow-hidden rounded-3xl bg-gray-100">
             {currentStep.image_url ? (
-                <div className="relative h-[220px] w-full">
-                    <Image
-                    src={currentStep.image_url}
-                    alt={`Cooking step ${currentStep.step_number}`}
-                    fill
-                    sizes="(max-width: 430px) 100vw, 430px"
-                    className="object-cover"
-                    />
-                </div>
-
+              <div className="relative h-[220px] w-full">
+                <Image
+                  src={currentStep.image_url}
+                  alt={`Cooking step ${currentStep.step_number}`}
+                  fill
+                  sizes="(max-width: 430px) 100vw, 430px"
+                  className="object-cover"
+                />
+              </div>
             ) : (
               <div className="px-8 text-center">
                 <span
@@ -421,7 +859,7 @@ export default function CookingPage() {
           </div>
         </section>
 
-        {/* Dynamic Cooking Timer */}
+        {/* Cooking Timer */}
         {currentStep.timer_seconds !== null &&
           timeLeft !== null && (
             <section className="mx-6 mb-6 rounded-3xl border border-gray-200 bg-gray-50 p-5">
@@ -460,8 +898,7 @@ export default function CookingPage() {
                   </p>
 
                   <p className="mt-1 text-xs text-gray-300">
-                    You can continue to the next
-                    step.
+                    You can continue to the next step.
                   </p>
                 </div>
               )}
@@ -501,17 +938,73 @@ export default function CookingPage() {
             </section>
           )}
 
-        {/* Cooking Controls */}
-        <section className="px-6 pb-6">
+        {/* Voice Commands */}
+        <section className="mx-6 mb-6 rounded-3xl border border-gray-200 bg-gray-50 p-5">
+          <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={startVoiceRecognition}
+              disabled={
+                !voiceSupported ||
+                voiceStatus === "listening"
+              }
+              className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-gray-900 text-2xl text-white shadow-md transition hover:bg-gray-700 disabled:cursor-not-allowed disabled:bg-gray-400"
+              aria-label="Start voice command"
+            >
+              {voiceStatus === "listening"
+                ? "•••"
+                : "🎙"}
+            </button>
 
+            <div>
+              <h2 className="font-semibold text-gray-900">
+                Voice Commands
+              </h2>
+
+              <p
+                className="mt-1 text-sm text-gray-600"
+                aria-live="polite"
+              >
+                {voiceMessage}
+              </p>
+            </div>
+          </div>
+
+          {/* Recognized Speech */}
+          {heardCommand && (
+            <div className="mt-4 rounded-xl bg-white p-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-400">
+                Heard
+              </p>
+
+              <p className="mt-1 text-sm font-medium text-gray-800">
+                &quot;{heardCommand}&quot;
+              </p>
+            </div>
+          )}
+
+          {/* Available Commands */}
+          <div className="mt-4 border-t border-gray-200 pt-4">
+            <p className="text-xs leading-5 text-gray-500">
+              Try saying: &quot;Next Step&quot; ·
+              &quot; Previous Step&quot; ·
+              &quot; Repeat Step&quot; ·
+              &quot; Start Timer&quot; ·
+              &quot; Pause Timer&quot; ·
+              &quot; Reset Timer&quot;
+            </p>
+          </div>
+        </section>
+
+        {/* Manual Controls */}
+        <section className="px-6 pb-6">
           <p className="mb-4 text-center text-sm text-gray-500">
-            Use the controls below to follow the
-            recipe
+            Manual controls
           </p>
 
           <div className="flex items-center justify-between">
 
-            {/* Previous Step */}
+            {/* Previous */}
             <button
               type="button"
               onClick={previousStep}
@@ -522,7 +1015,7 @@ export default function CookingPage() {
               ←
             </button>
 
-            {/* Repeat Instruction */}
+            {/* Repeat */}
             <button
               type="button"
               onClick={speakCurrentStep}

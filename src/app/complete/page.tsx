@@ -3,7 +3,11 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import {
+  Suspense,
+  useEffect,
+  useState,
+} from "react";
 import { supabase } from "@/lib/supabase";
 
 type Recipe = {
@@ -12,7 +16,27 @@ type Recipe = {
   image_url: string | null;
 };
 
-export default function CompletePage() {
+/*
+ * Loading interface used by the Suspense boundary
+ * while the completion page is being prepared.
+ */
+function CompletionLoading() {
+  return (
+    <main className="min-h-screen bg-gray-100 flex justify-center">
+      <div className="min-h-screen w-full max-w-[430px] bg-white p-6">
+        <p className="pt-10 text-center text-gray-500">
+          Loading completion details...
+        </p>
+      </div>
+    </main>
+  );
+}
+
+/*
+ * This component contains the client-side logic that
+ * reads the recipe ID from the URL.
+ */
+function CompletionContent() {
   const searchParams = useSearchParams();
   const recipeId = Number(searchParams.get("recipe"));
 
@@ -75,18 +99,10 @@ export default function CompletePage() {
   }, [recipeId]);
 
   /*
-   * Loading state.
+   * Loading state while Supabase data is retrieved.
    */
   if (loading) {
-    return (
-      <main className="min-h-screen bg-gray-100 flex justify-center">
-        <div className="min-h-screen w-full max-w-[430px] bg-white p-6">
-          <p className="pt-10 text-center text-gray-500">
-            Loading completion details...
-          </p>
-        </div>
-      </main>
-    );
+    return <CompletionLoading />;
   }
 
   /*
@@ -113,7 +129,8 @@ export default function CompletePage() {
               </h1>
 
               <p className="mt-2 text-sm text-red-700">
-                {error ?? "Recipe information is unavailable."}
+                {error ??
+                  "Recipe information is unavailable."}
               </p>
             </div>
           </div>
@@ -204,5 +221,17 @@ export default function CompletePage() {
         </section>
       </div>
     </main>
+  );
+}
+
+/*
+ * The component using useSearchParams must be rendered
+ * inside Suspense so Next.js can build the page correctly.
+ */
+export default function CompletePage() {
+  return (
+    <Suspense fallback={<CompletionLoading />}>
+      <CompletionContent />
+    </Suspense>
   );
 }
