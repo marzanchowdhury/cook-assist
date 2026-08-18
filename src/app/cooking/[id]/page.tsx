@@ -384,6 +384,84 @@ export default function CookingPage() {
   }, [steps, currentStepIndex, speakText]);
 
   /*
+   * Manual next-step navigation.
+   *
+   * If Hands-Free Mode is enabled, automatically read
+   * the newly displayed step aloud. speakText() will
+   * resume hands-free listening when speech finishes.
+   */
+  const handleManualNextStep = useCallback(() => {
+    if (currentStepIndex >= steps.length - 1) {
+      return;
+    }
+
+    const nextInstruction =
+      steps[currentStepIndex + 1]?.instruction;
+
+    nextStep();
+
+    if (
+      handsFreeModeRef.current &&
+      nextInstruction
+    ) {
+      speechPendingRef.current = true;
+
+      setVoiceStatus("success");
+      setVoiceMessage(
+        "Moving to the next step."
+      );
+
+      window.setTimeout(() => {
+        speakText(nextInstruction);
+      }, 250);
+    }
+  }, [
+    currentStepIndex,
+    steps,
+    nextStep,
+    speakText,
+  ]);
+
+  /*
+   * Manual previous-step navigation.
+   *
+   * If Hands-Free Mode is enabled, automatically read
+   * the newly displayed step aloud. speakText() will
+   * resume hands-free listening when speech finishes.
+   */
+  const handleManualPreviousStep = useCallback(() => {
+    if (currentStepIndex <= 0) {
+      return;
+    }
+
+    const previousInstruction =
+      steps[currentStepIndex - 1]?.instruction;
+
+    previousStep();
+
+    if (
+      handsFreeModeRef.current &&
+      previousInstruction
+    ) {
+      speechPendingRef.current = true;
+
+      setVoiceStatus("success");
+      setVoiceMessage(
+        "Moving to the previous step."
+      );
+
+      window.setTimeout(() => {
+        speakText(previousInstruction);
+      }, 250);
+    }
+  }, [
+    currentStepIndex,
+    steps,
+    previousStep,
+    speakText,
+  ]);
+
+  /*
    * Timer countdown.
    */
   useEffect(() => {
@@ -570,9 +648,6 @@ export default function CookingPage() {
           "Repeating the current instruction."
         );
 
-        /*
-         * Give recognition time to release the microphone.
-         */
         window.setTimeout(() => {
           speakCurrentStep();
         }, 250);
@@ -1427,7 +1502,7 @@ export default function CookingPage() {
           <div className="flex items-center justify-between">
             <button
               type="button"
-              onClick={previousStep}
+              onClick={handleManualPreviousStep}
               disabled={currentStepIndex === 0}
               className="flex h-14 w-14 items-center justify-center rounded-full bg-gray-800 text-2xl font-bold text-white shadow-md transition hover:bg-gray-700 disabled:bg-gray-300 disabled:text-gray-500 disabled:shadow-none"
               aria-label="Previous step"
@@ -1463,7 +1538,7 @@ export default function CookingPage() {
             ) : (
               <button
                 type="button"
-                onClick={nextStep}
+                onClick={handleManualNextStep}
                 className="flex h-14 w-14 items-center justify-center rounded-full bg-gray-800 text-2xl font-bold text-white shadow-md transition hover:bg-gray-700"
                 aria-label="Next step"
               >
