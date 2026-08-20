@@ -15,8 +15,40 @@ type Recipe = {
   image_url: string | null;
 };
 
-export default function Home() {
+const FAVORITES_STORAGE_KEY = "cook-assist-favorites";
+
+function getStoredFavorites(): number[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const storedFavorites = localStorage.getItem(FAVORITES_STORAGE_KEY);
+
+    if (!storedFavorites) {
+      return [];
+    }
+
+    const parsedFavorites: unknown = JSON.parse(storedFavorites);
+
+    if (
+      Array.isArray(parsedFavorites) &&
+      parsedFavorites.every((id) => typeof id === "number")
+    ) {
+      return parsedFavorites;
+    }
+
+    return [];
+  } catch {
+    localStorage.removeItem(FAVORITES_STORAGE_KEY);
+    return [];
+  }
+}
+
+export default function RecipesPage() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [favoriteIds, setFavoriteIds] =
+    useState<number[]>(getStoredFavorites);
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +74,23 @@ export default function Home() {
     loadRecipes();
   }, []);
 
+  function toggleFavorite(recipeId: number) {
+    setFavoriteIds((currentFavorites) => {
+      const isAlreadyFavorite = currentFavorites.includes(recipeId);
+
+      const updatedFavorites = isAlreadyFavorite
+        ? currentFavorites.filter((id) => id !== recipeId)
+        : [...currentFavorites, recipeId];
+
+      localStorage.setItem(
+        FAVORITES_STORAGE_KEY,
+        JSON.stringify(updatedFavorites)
+      );
+
+      return updatedFavorites;
+    });
+  }
+
   const filteredRecipes = recipes.filter((recipe) => {
     const query = searchQuery.trim().toLowerCase();
 
@@ -60,16 +109,12 @@ export default function Home() {
     <main className="min-h-screen bg-gray-100 flex justify-center">
       <div className="min-h-screen w-full max-w-[430px] bg-white flex flex-col">
         <section className="flex-1 px-6 pt-10 pb-8">
-          <p className="text-sm text-gray-500">
-            Good afternoon
-          </p>
-
-          <h1 className="mt-1 text-3xl font-bold text-gray-900">
-            Cook Assist
+          <h1 className="text-3xl font-bold text-gray-900">
+            Recipes
           </h1>
 
           <p className="mt-2 text-gray-500">
-            What would you like to cook today?
+            Browse all available recipes.
           </p>
 
           {/* Search */}
@@ -95,66 +140,68 @@ export default function Home() {
             </span>
           </div>
 
-          {/* Recipes */}
-          <div className="mt-9">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900">
-                Recipes
-              </h2>
+          {/* Recipe count */}
+          <div className="mt-9 flex items-center justify-between">
+            <h2 className="text-xl font-bold text-gray-900">
+              All Recipes
+            </h2>
 
-              <p className="text-sm text-gray-500">
-                {filteredRecipes.length} available
+            <p className="text-sm text-gray-500">
+              {filteredRecipes.length} available
+            </p>
+          </div>
+
+          {/* Loading */}
+          {loading && (
+            <div className="mt-6 rounded-3xl bg-gray-50 p-6 text-center">
+              <p className="text-gray-500">
+                Loading recipes...
               </p>
             </div>
+          )}
 
-            {/* Loading */}
-            {loading && (
-              <div className="mt-6 rounded-3xl bg-gray-50 p-6 text-center">
-                <p className="text-gray-500">
-                  Loading recipes...
-                </p>
-              </div>
-            )}
+          {/* Error */}
+          {error && (
+            <div
+              role="alert"
+              className="mt-6 rounded-3xl border border-red-200 bg-red-50 p-5"
+            >
+              <p className="font-semibold text-red-800">
+                Unable to load recipes
+              </p>
 
-            {/* Error */}
-            {error && (
-              <div
-                role="alert"
-                className="mt-6 rounded-3xl border border-red-200 bg-red-50 p-5"
-              >
-                <p className="font-semibold text-red-800">
-                  Unable to load recipes
-                </p>
+              <p className="mt-1 text-sm text-red-700">
+                {error}
+              </p>
+            </div>
+          )}
 
-                <p className="mt-1 text-sm text-red-700">
-                  {error}
-                </p>
-              </div>
-            )}
+          {/* No results */}
+          {!loading && !error && filteredRecipes.length === 0 && (
+            <div className="mt-6 rounded-3xl bg-gray-50 p-6 text-center">
+              <p className="font-semibold text-gray-800">
+                No recipes found
+              </p>
 
-            {/* No search results */}
-            {!loading && !error && filteredRecipes.length === 0 && (
-              <div className="mt-6 rounded-3xl bg-gray-50 p-6 text-center">
-                <p className="font-semibold text-gray-800">
-                  No recipes found
-                </p>
+              <p className="mt-1 text-sm text-gray-500">
+                Try a different search.
+              </p>
+            </div>
+          )}
 
-                <p className="mt-1 text-sm text-gray-500">
-                  Try a different search.
-                </p>
-              </div>
-            )}
+          {/* Recipe cards */}
+          {!loading && !error && filteredRecipes.length > 0 && (
+            <div className="mt-5 space-y-6">
+              {filteredRecipes.map((recipe) => {
+                const isFavorite = favoriteIds.includes(recipe.id);
 
-            {/* Recipe cards */}
-            {!loading && !error && filteredRecipes.length > 0 && (
-              <div className="mt-5 space-y-6">
-                {filteredRecipes.map((recipe) => (
+                return (
                   <article
                     key={recipe.id}
                     className="overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm"
                   >
                     {/* Recipe image */}
-                    <div className="flex min-h-[190px] items-center justify-center bg-gray-100">
+                    <div className="relative flex min-h-[190px] items-center justify-center bg-gray-100">
                       {recipe.image_url ? (
                         <div className="relative h-[190px] w-full">
                           <Image
@@ -179,13 +226,38 @@ export default function Home() {
                           </p>
                         </div>
                       )}
+
+                      {/* Favorite button */}
+                      <button
+                        type="button"
+                        onClick={() => toggleFavorite(recipe.id)}
+                        aria-label={
+                          isFavorite
+                            ? `Remove ${recipe.title} from favorites`
+                            : `Add ${recipe.title} to favorites`
+                        }
+                        aria-pressed={isFavorite}
+                        className="absolute right-4 top-4 flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl text-gray-900 shadow-md transition hover:scale-105"
+                      >
+                        <span aria-hidden="true">
+                          {isFavorite ? "♥" : "♡"}
+                        </span>
+                      </button>
                     </div>
 
                     {/* Recipe information */}
                     <div className="p-5">
-                      <h3 className="text-xl font-bold text-gray-900">
-                        {recipe.title}
-                      </h3>
+                      <div className="flex items-start justify-between gap-4">
+                        <h3 className="text-xl font-bold text-gray-900">
+                          {recipe.title}
+                        </h3>
+
+                        {isFavorite && (
+                          <span className="shrink-0 text-xs font-semibold text-gray-500">
+                            Favorite
+                          </span>
+                        )}
+                      </div>
 
                       <p className="mt-1 text-sm leading-6 text-gray-500">
                         {recipe.description}
@@ -213,19 +285,18 @@ export default function Home() {
                       </Link>
                     </div>
                   </article>
-                ))}
-              </div>
-            )}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {/* Navigation */}
         <nav className="sticky bottom-0 border-t border-gray-200 bg-white px-6 py-4">
           <div className="flex items-center justify-between text-xs">
-            {/* Home */}
             <Link
               href="/"
-              className="text-center font-semibold text-gray-900"
+              className="text-center text-gray-400 transition hover:text-gray-900"
             >
               <div className="mb-1 text-lg">
                 ⌂
@@ -233,10 +304,9 @@ export default function Home() {
               Home
             </Link>
 
-            {/* Recipes */}
             <Link
               href="/recipes"
-              className="text-center text-gray-400 transition hover:text-gray-900"
+              className="text-center font-semibold text-gray-900"
             >
               <div className="mb-1 text-lg">
                 ▤
@@ -244,7 +314,6 @@ export default function Home() {
               Recipes
             </Link>
 
-            {/* Favorites */}
             <Link
               href="/favorites"
               className="text-center text-gray-400 transition hover:text-gray-900"
@@ -255,11 +324,7 @@ export default function Home() {
               Favorites
             </Link>
 
-            {/* Profile - planned for next phase */}
-            <div
-              className="text-center text-gray-400"
-              aria-disabled="true"
-            >
+            <div className="text-center text-gray-400">
               <div className="mb-1 text-lg">
                 ♙
               </div>
