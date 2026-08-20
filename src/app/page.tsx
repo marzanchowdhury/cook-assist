@@ -148,7 +148,7 @@ export default function Home() {
             {/* Recipe cards */}
             {!loading && !error && filteredRecipes.length > 0 && (
               <div className="mt-5 space-y-6">
-                {filteredRecipes.map((recipe) => (
+                {filteredRecipes.map((recipe, index) => (
                   <article
                     key={recipe.id}
                     className="overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm"
@@ -162,6 +162,7 @@ export default function Home() {
                             alt={recipe.title}
                             fill
                             sizes="(max-width: 430px) 100vw, 430px"
+                            loading={index === 0 ? "eager" : "lazy"}
                             className="object-cover"
                           />
                         </div>
